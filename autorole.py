@@ -1,23 +1,27 @@
 """
-Discord Auto-Role Bot
----------------------
-Automatically gives new members a role when they join.
+Discord Auto-Role Bot (hosting-ready for Render)
+------------------------------------------------
+Requires: Python 3.9+, discord.py 2.x, python-dotenv, flask
+Install:  pip install -U discord.py python-dotenv flask
 
-Requires: Python 3.9+, discord.py 2.x, python-dotenv
-Uses the SAME ".env" file as your anti-spam bot (DISCORD_TOKEN=...).
-
-Run it in a SECOND terminal window (keep the anti-spam bot running):
-    python autorole.py
+Setup:
+  1. Locally: create ".env" next to this file:  DISCORD_TOKEN=your_token
+     On Render: set DISCORD_TOKEN in Environment (do NOT upload .env!)
+  2. Enable "Server Members Intent" + "Message Content Intent"
+     in the Discord Developer Portal (Bot tab).
+  3. Run:  python autorole.py
 """
 
 import asyncio
 import copy
 import json
 import os
+from threading import Thread
 
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
+from flask import Flask
 
 # ═══════════════════════════ TOKEN ═══════════════════════════
 
@@ -45,9 +49,9 @@ intents.members = True          # needed to detect new members
 bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
 
 settings = {}
-hierarchy_warned = set()  # guilds we've already warned about bad setup
+hierarchy_warned = set()
 
-# ═══════════════════════════ SETTINGS PERSISTENCE ═══════════════════════════
+# ═══════════════════════ SETTINGS PERSISTENCE ═══════════════════════
 
 def load_settings():
     if os.path.exists(SETTINGS_FILE):
@@ -59,8 +63,11 @@ def load_settings():
             pass
 
 def save_settings():
-    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-        json.dump(settings, f, indent=2)
+    try:
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=2)
+    except OSError:
+        pass  # read-only disk on host = settings live in memory only
 
 def cfg_for(guild_id: int) -> dict:
     if guild_id not in settings:
@@ -68,10 +75,10 @@ def cfg_for(guild_id: int) -> dict:
         save_settings()
     return settings[guild_id]
 
-# ═══════════════════════════ HELPERS ═══════════════════════════
+# ═══════════════════════ HELPERS ═══════════════════════
 
 def assignable_roles(guild: discord.Guild, role_ids) -> list:
-    """Return only the roles the bot is actually allowed to give."""
+    """Only the roles the bot is actually allowed to give."""
     me = guild.me
     out = []
     for rid in role_ids:
@@ -83,17 +90,18 @@ def assignable_roles(guild: discord.Guild, role_ids) -> list:
     return out
 
 def setup_problem(guild: discord.Guild, role: discord.Role):
-    """Return a human-readable problem string, or None if the role is fine."""
+    """Human-readable problem string, or None if the role is fine."""
     me = guild.me
     if not me.guild_permissions.manage_roles:
-        return "I'm missing the **Manage Roles** permission. Go to Server Settings → Roles → click my role → enable **Manage Roles**."
+        return ("I'm missing the **Manage Roles** permission. "
+                "Server Settings → Roles → my role → enable **Manage Roles**.")
     if role == guild.default_role:
         return "you can't assign **@everyone**."
     if role.managed:
-        return f"**{role.name}** is managed by another bot/integration and can't be assigned."
+        return f"**{role.name}** is managed by another bot/integration."
     if role >= me.top_role:
-        return (f"my role is **below** {role.mention}. Go to Server Settings → Roles "
-                f"and drag my role **above** it.")
+        return (f"my role is **below** {role.mention}. Server Settings → Roles → "
+                f"drag my role **above** it.")
     return None
 
 def mod_only():
@@ -104,10 +112,9 @@ def mod_only():
         return p.administrator or p.manage_roles
     return commands.check(predicate)
 
-# ═══════════════════════════ CORE LOGIC ═══════════════════════════
+# ═══════════════════════ CORE LOGIC ═══════════════════════
 
 async def warn_owner(guild: discord.Guild, text: str):
-    """Try to alert the server via the log channel or system channel."""
     cfg = cfg_for(guild.id)
     channel = guild.get_channel(cfg["log_channel"]) if cfg["log_channel"] else guild.system_channel
     if channel:
@@ -117,7 +124,6 @@ async def warn_owner(guild: discord.Guild, text: str):
             pass
 
 async def give_join_roles(member: discord.Member) -> list:
-    """Assign the configured auto-roles to a member. Returns roles assigned."""
     guild = member.guild
     cfg = cfg_for(guild.id)
     wanted = [cfg["bot_role"]] if member.bot else [r for r in cfg["roles"] if r]
@@ -131,7 +137,8 @@ async def give_join_roles(member: discord.Member) -> list:
             hierarchy_warned.add(guild.id)
             names = ", ".join(f"<@&{r}>" for r in wanted)
             await warn_owner(guild,
-                f"I can't assign {names}. Do I have **Manage Roles**, and is my role **above** them?")
+                f"I can't assign {names}. Do I have **Manage Roles**, "
+                f"and is my role **above** them?")
         return []
 
     # Optional delay (lets anti-raid tools ban raiders first)
@@ -165,7 +172,7 @@ async def send_join_log(guild, member, roles):
     except discord.HTTPException:
         pass
 
-# ═══════════════════════════ EVENTS ═══════════════════════════
+# ═══════════════════════ EVENTS ═══════════════════════
 
 @bot.event
 async def on_member_join(member: discord.Member):
@@ -193,7 +200,7 @@ async def on_ready():
     await bot.change_presence(activity=discord.Activity(
         type=discord.ActivityType.watching, name="for new members 🎭"))
 
-# ═══════════════════════════ COMMANDS ═══════════════════════════
+# ═══════════════════════ COMMANDS ═══════════════════════
 
 @bot.group(invoke_without_command=True)
 @commands.guild_only()
@@ -311,7 +318,8 @@ async def autorole_test(ctx, member: discord.Member):
         if not [r for r in wanted if r]:
             await ctx.reply(f"No auto-roles configured yet — use `{PREFIX}autorole add <role>`.")
         else:
-            await ctx.reply("⚠️ Couldn't assign the role — check my **Manage Roles** permission and that my role is **above** it.")
+            await ctx.reply("⚠️ Couldn't assign the role — check my **Manage Roles** "
+                            "permission and that my role is **above** it.")
 
 @autorole.command(name="show")
 @mod_only()
@@ -345,19 +353,28 @@ async def on_command_error(ctx, error):
             pass
     elif isinstance(error, commands.BadArgument):
         try:
-            await ctx.reply("❌ Invalid argument — check the usage with `!autorole`.")
+            await ctx.reply("❌ Invalid argument — check usage with `!autorole`.")
         except discord.HTTPException:
             pass
     else:
         print(f"Command error: {error!r}")
 
-# ═══════════════════════════ RUN ═══════════════════════════
+# ═══════════════════════ KEEP ALIVE + RUN ═══════════════════════
+
+web_app = Flask('')
+
+@web_app.route('/')
+def home():
+    return "Auto-role bot is alive! ✅"
+
+def keep_alive():
+    port = int(os.environ.get("PORT", 8080))
+    Thread(target=lambda: web_app.run(host='0.0.0.0', port=port), daemon=True).start()
 
 if __name__ == "__main__":
-    if not TOKEN or "paste_your" in TOKEN:
-        print("❌ No token found. Put DISCORD_TOKEN=... in the .env file (same one as the anti-spam bot).")
+    if not TOKEN:
+        print("❌ DISCORD_TOKEN missing — set it in .env (local) or Render → Environment.")
     else:
         load_settings()
+        keep_alive()   # must run BEFORE bot.run()
         bot.run(TOKEN)
-        from keep_alive import keep_alive
-        keep_alive()
